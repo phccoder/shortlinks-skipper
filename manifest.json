@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Shortlinks Skipper",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Automatically skip common shortlink pages and redirect immediately.",
-  "permissions": ["scripting", "activeTab", "storage"],
-  "host_permissions": ["*://*/*"],
+  "author": "phccoder",
+  "homepage_url": "https://github.com/phccoder/shortlinks-skipper",
+  "minimum_chrome_version": "102",
+  "permissions": ["storage", "activeTab"],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["utils.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": true,
       "match_about_blank": true
@@ -34,7 +36,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "shortlinks-skipper@example.com",
+      "id": "shortlinks-skipper@phccoder.github.io",
       "strict_min_version": "121.0"
     }
   }

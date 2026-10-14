@@ -77,8 +77,11 @@
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.primary:hover { background: var(--accent-press); }
     button.small { padding: 5px 8px; font-size: 11px; }
+    button.danger { color: var(--danger); border-color: #f1c9c9; }
+    button.danger:hover { background: #fdeaea; }
     footer { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
     #status { color: var(--ok); font-size: 11px; font-weight: 600; }
+    #status.err { color: var(--danger); }
 
     /* toggle switch */
     .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
@@ -138,11 +141,23 @@
     <textarea id="blacklist" rows="3" placeholder="ads.example.com" spellcheck="false"></textarea>
   </details>
 
+  <details class="card">
+    <summary>Backup &amp; reset</summary>
+    <div class="hint">Export your lists to a file, import them back, or reset everything.</div>
+    <div class="actions">
+      <button class="small" id="btn-export">Export</button>
+      <button class="small" id="btn-import">Import</button>
+      <button class="small danger" id="btn-reset">Reset</button>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+    </div>
+  </details>
+
   <footer>
     <button class="primary" id="save">Save</button>
     <span id="status"></span>
   </footer>
 
+  <script src="utils.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

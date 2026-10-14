@@ -1,9 +1,17 @@
 (function () {
+  const U = (typeof self !== 'undefined' && self.ShortlinksUtils) ||
+    (typeof ShortlinksUtils !== 'undefined' ? ShortlinksUtils : null);
+  if (!U) return;
+  const parseOnclick = U.parseOnclick;
+  const parseHref = U.parseHref;
+  const domainAllowed = U.domainAllowed;
+  const scoreGetLink = U.scoreGetLink;
+
   const isEarlyPage = () => {
     const t = (document.title || '').toLowerCase();
     if (t.includes('just a moment') || t.includes('one moment') || t.includes('checking your browser') ||
       t.includes('attention required') || t.includes('cloudflare') || t.includes('ddos')) return true;
-    const bodyText = (document.body?.textContent || '').toLowerCase();
+    const bodyText = (document.body && document.body.textContent || '').toLowerCase();
     if (bodyText.includes('checking your browser') || bodyText.includes('ddos protection') ||
       bodyText.includes('enable javascript and cookies to continue') ||
       bodyText.includes('please wait while your request is being verified') ||
@@ -12,7 +20,7 @@
   };
 
   const tooEarlyPage = () => {
-    const body = (document.body?.textContent || '').toLowerCase();
+    const body = (document.body && document.body.textContent || '').toLowerCase();
     const title = (document.title || '').toLowerCase();
     return body.includes('too early') || body.includes("isn't ready yet") ||
       body.includes('isnt ready yet') || body.includes('url isnt ready') ||
@@ -46,6 +54,15 @@
     return rect.width > 0 && rect.height > 0;
   };
 
+  function captchaPresent() {
+    try {
+      return !!document.querySelector(
+        'iframe[src*="challenges.cloudflare.com"], iframe[src*="hcaptcha.com"], iframe[src*="recaptcha"], ' +
+        '.g-recaptcha, .h-captcha, .cf-turnstile, [class*="turnstile"], #challenge-form, #cf-challenge-running'
+      );
+    } catch (e) { return false; }
+  }
+
   function findClickable(el) {
     if (!el) return null;
     if (el.tagName === 'A' || el.tagName === 'BUTTON' || el.tagName === 'INPUT') return el;
@@ -56,6 +73,7 @@
 
   let redirected = false;
   let running = false;
+  let navigating = false;
   function markDone() { window.__shortlinks_skipper_done__ = true; }
   function isDone() { return window.__shortlinks_skipper_done__; }
 
@@ -68,27 +86,15 @@
   }
 
   function clickElement(el) {
-    if (!el || redirected || isDone()) return false;
+    if (!el || redirected || isDone() || navigating) return false;
     const c = findClickable(el);
     if (!c) return false;
     try { c.focus(); } catch (e) {}
-    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'dblclick'].forEach(type => {
+    ['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(type => {
       try { c.dispatchEvent(new Event(type, { bubbles: true, cancelable: true })); } catch (e) {}
     });
     try { c.click(); } catch (e) {}
     return true;
-  }
-
-  function htmlDecode(str) {
-    if (!str) return '';
-    return str
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#0*39;/g, "'")
-      .replace(/&#x0*27;/gi, "'")
-      .replace(/&apos;/g, "'")
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>');
   }
 
   function extractLink(el) {
@@ -97,19 +103,10 @@
     if (!oc && typeof el.onclick === 'function') {
       try { oc = el.onclick.toString(); } catch (e) { oc = ''; }
     }
-    if (oc) {
-      const handler = htmlDecode(oc);
-      let m = handler.match(/window\.open\(\s*['"]([^'"]+)['"]/);
-      if (!m) m = handler.match(/location\.(?:href|replace\s*\()\s*=?\s*['"]([^'"]+)['"]/);
-      if (!m) m = handler.match(/location\.replace\(\s*['"]([^'"]+)['"]/);
-      if (!m) m = handler.match(/location\.(?:href|assign)\s*=\s*['"]([^'"]+)['"]/);
-      if (!m) m = handler.match(/['"](https?:\/\/[^'"]+)['"]/);
-      if (m && m[1]) return m[1];
-    }
-    const href = el.getAttribute ? el.getAttribute('href') : '';
-    const rawHref = htmlDecode(el.href || href || '');
-    if (rawHref && rawHref.startsWith('http') && !rawHref.includes('#')) return rawHref;
-    return '';
+    const fromOnclick = parseOnclick(oc);
+    if (fromOnclick) return fromOnclick;
+    const href = el.getAttribute ? (el.getAttribute('href') || el.href || '') : (el.href || '');
+    return parseHref(href);
   }
 
   function findGenerate() {
@@ -142,42 +139,34 @@
       const a = l.querySelector('a[onclick], a[href]') || l.querySelector('a');
       if (a) return a;
     }
-    const a = document.querySelector(
-      'a[onclick*="window.open"], a[onclick*="safelink_redirect"], a[onclick*="location.href"], a[onclick*="location.replace"]'
-    );
+    const a = document.querySelector('a[onclick*="safelink_redirect"], a[onclick*="wpsafegenerate"]');
     if (a) return a;
     return null;
   }
 
   function findGetLink() {
     const nodes = document.querySelectorAll('a, button, input[type="button"], input[type="submit"]');
-    const generic = ['click here', 'verify', 'proceed', 'continue'];
     let best = null, bestScore = 0;
     for (const el of nodes) {
       if (!isVisible(el)) continue;
-      const txt = (el.textContent || el.value || '').trim().toLowerCase();
-      const idc = ((el.id || '') + ' ' + el.className).toLowerCase();
-      let score = 0;
-      if (/(get-?link|btn6|go-link)/.test(idc)) score = 3;
-      else if (txt === 'get link' || txt === 'getlink') score = 3;
-      else if (txt.includes('get link')) score = 2;
-      else if (/\b(continue|proceed)\b/.test(txt) || /(continue|proceed)/.test(idc)) score = 2;
-      else if (generic.some(w => txt.includes(w))) score = 1;
+      const txt = el.textContent || el.value || '';
+      const idc = (el.id || '') + ' ' + (el.className || '');
+      const score = scoreGetLink(txt, idc);
       if (score > bestScore) { bestScore = score; best = el; }
     }
     return bestScore >= 1 ? best : null;
-  }
-
-  function inShortenerFlow() {
-    try { if (sessionStorage.getItem('__sl_shortener__') === '1') return true; } catch (e) {}
-    if (!isShortenerHost()) return false;
-    return location.pathname.replace(/\/+$/, '').length > 1;
   }
 
   function hasSafelink() {
     return !!(document.getElementById('wpsafe-generate') ||
       document.getElementById('wpsafe-link') ||
       document.querySelector('a[onclick*="safelink_redirect"], a[onclick*="wpsafegenerate"]'));
+  }
+
+  function inShortenerFlow() {
+    try { if (sessionStorage.getItem('__sl_shortener__') === '1') return true; } catch (e) {}
+    if (!isShortenerHost()) return false;
+    return location.pathname.replace(/\/+$/, '').length > 1;
   }
 
   function isTargetPage() {
@@ -195,8 +184,13 @@
     return false;
   }
 
+  let overlayStatusEl = null;
+  let overlayTimer = null;
+  let overlayDismissed = false;
+
   function showOverlay() {
     try {
+      if (overlayDismissed || captchaPresent()) return;
       if (document.getElementById('__sl_overlay')) return;
 
       const el = document.createElement('div');
@@ -221,17 +215,25 @@
         'letter-spacing:.4px!important;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif!important';
       title.textContent = 'Skipping…';
 
-      const sub = document.createElement('div');
-      sub.style.cssText =
+      const status = document.createElement('div');
+      status.style.cssText =
         'all:initial;color:rgba(255,255,255,.55)!important;font-size:12px!important;' +
         'font-weight:600!important;letter-spacing:1px!important;text-transform:uppercase!important;' +
         'font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif!important';
-      sub.textContent = 'Shortlinks Skipper';
+      status.textContent = 'Preparing…';
+
+      const hint = document.createElement('div');
+      hint.style.cssText =
+        'all:initial;color:rgba(255,255,255,.3)!important;font-size:11px!important;' +
+        'font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif!important';
+      hint.textContent = 'Press Esc to show this page';
 
       el.appendChild(ring);
       el.appendChild(title);
-      el.appendChild(sub);
+      el.appendChild(status);
+      el.appendChild(hint);
       (document.documentElement || document.body).appendChild(el);
+      overlayStatusEl = status;
 
       try {
         if (ring.animate) {
@@ -248,38 +250,72 @@
         }
       } catch (e) {}
 
-      setTimeout(() => { try { if (!redirected) hideOverlay(); } catch (e) {} }, 60000);
+      overlayTimer = setTimeout(() => { hideOverlay(); }, 90000);
     } catch (e) {}
+  }
+
+  function setOverlayStatus(msg) {
+    if (overlayStatusEl && overlayStatusEl.textContent !== msg) overlayStatusEl.textContent = msg;
   }
 
   function hideOverlay() {
     const el = document.getElementById('__sl_overlay');
     if (el) el.remove();
+    if (overlayTimer) { clearTimeout(overlayTimer); overlayTimer = null; }
+    overlayStatusEl = null;
+  }
+
+  function dismissOverlay() {
+    overlayDismissed = true;
+    hideOverlay();
+  }
+
+  function giveUp(msg) {
+    setOverlayStatus(msg);
+    setTimeout(() => {
+      if (overlayStatusEl === null || (overlayStatusEl && overlayStatusEl.textContent === msg)) dismissOverlay();
+    }, 2500);
+  }
+
+  let globalBound = false;
+  function bindGlobal() {
+    if (globalBound) return;
+    globalBound = true;
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissOverlay(); }, true);
+    window.addEventListener('pagehide', () => { navigating = true; }, true);
+    window.addEventListener('beforeunload', () => { navigating = true; }, true);
   }
 
   async function handleTooEarly() {
+    setOverlayStatus('Waiting for the unlock…');
     try { sessionStorage.setItem('__sl_shortener__', '1'); } catch (e) {}
     for (let i = 0; i < 80; i++) {
-      if (!tooEarlyPage()) {
-        run();
-        return;
-      }
+      if (navigating || redirected) return;
+      if (!tooEarlyPage()) { run(); return; }
       await sleep(250);
     }
     let n = 0;
     try { n = parseInt(sessionStorage.getItem('__sl_tooearly_n__') || '0', 10) || 0; } catch (e) {}
-    if (n >= 8) return;
+    if (n >= 8) { giveUp('Unlock not ready — try reloading'); return; }
     try { sessionStorage.setItem('__sl_tooearly_n__', String(n + 1)); } catch (e) {}
+    setOverlayStatus('Reloading to retry…');
     setTimeout(() => { try { window.location.reload(); } catch (e) {} }, 1000);
   }
 
   async function runShortenerFlow() {
     const deadline = Date.now() + 240000;
-    let lastEl = null, lastClick = 0;
+    let lastEl = null, lastClick = 0, lastMsg = '';
     while (Date.now() < deadline) {
-      if (isDone() || redirected) return;
+      if (isDone() || redirected || navigating) return;
+      showOverlay();
+      if (captchaPresent()) {
+        if (lastMsg !== 'v') { setOverlayStatus('Complete the verification to continue…'); lastMsg = 'v'; }
+        await sleep(500);
+        continue;
+      }
       const gl = findGetLink();
       if (gl) {
+        if (lastMsg !== 'c') { setOverlayStatus('Clicking through…'); lastMsg = 'c'; }
         const now = Date.now();
         if (gl !== lastEl || now - lastClick > 1500) {
           clickElement(gl);
@@ -288,39 +324,46 @@
         }
         await sleep(250);
       } else {
+        if (lastMsg !== 'w') { setOverlayStatus('Waiting for Get Link…'); lastMsg = 'w'; }
         await sleep(150);
       }
     }
+    if (!isDone() && !redirected && !navigating) giveUp('Still on the shortener page — showing it');
   }
 
   async function run() {
-    if (running || isDone() || redirected) return;
+    if (running || isDone() || redirected || navigating) return;
     running = true;
     try {
+      if (!isTargetPage()) return;
       if (inShortenerFlow()) {
+        showOverlay();
         await runShortenerFlow();
         return;
       }
+      showOverlay();
       try {
         if (typeof window.wpsafegenerate === 'function') {
           window.wpsafegenerate();
           await sleep(150);
-          if (isDone() || redirected) return;
+          if (isDone() || redirected || navigating) return;
         }
       } catch (e) {}
       for (let i = 0; i < 1800; i++) {
-        if (isDone() || redirected) return;
+        if (isDone() || redirected || navigating) return;
+        if (captchaPresent()) {
+          setOverlayStatus('Complete the verification to continue…');
+          await sleep(500);
+          continue;
+        }
         const fin = findFinal();
         if (fin) {
           const url = extractLink(fin);
-          if (url) {
-            redirectToUrl(url);
-            return;
-          }
+          if (url) { redirectToUrl(url); return; }
           if (isVisible(fin)) {
             clickElement(fin);
             await sleep(60);
-            if (isDone() || redirected) return;
+            if (isDone() || redirected || navigating) return;
             continue;
           }
         }
@@ -328,26 +371,44 @@
         if (gen && isVisible(gen)) {
           clickElement(gen);
           await sleep(60);
-          if (isDone() || redirected) return;
+          if (isDone() || redirected || navigating) return;
           continue;
         }
         await sleep(20);
       }
+      if (!isDone() && !redirected && !navigating) giveUp('Could not find the link — showing the page');
     } finally {
       running = false;
     }
   }
 
   let observerAttached = false;
+  let pendingRun = null;
+  function scheduleRun() {
+    if (pendingRun) return;
+    pendingRun = setTimeout(() => { pendingRun = null; run(); }, 120);
+  }
+
+  function attachObserver() {
+    if (observerAttached) return;
+    observerAttached = true;
+    try {
+      const obs = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          const t = m.target;
+          if (t && t.closest && t.closest('#__sl_overlay')) continue;
+          scheduleRun();
+          return;
+        }
+      });
+      obs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+    } catch (e) {}
+  }
+
   function start() {
     if (!isTargetPage()) return;
-    if (!observerAttached) {
-      observerAttached = true;
-      try {
-        const obs = new MutationObserver(run);
-        obs.observe(document.body || document.documentElement, { childList: true, subtree: true, attributes: true });
-      } catch (e) {}
-    }
+    bindGlobal();
+    attachObserver();
     if (skipContext()) showOverlay();
     if (tooEarlyPage()) { handleTooEarly(); return; }
     try { sessionStorage.removeItem('__sl_tooearly_n__'); } catch (e) {}
@@ -358,24 +419,12 @@
     run();
   }
 
-  function domainAllowed(data) {
-    if (data.enabled === false) return false;
-    const host = (location.hostname || '').toLowerCase();
-    const match = (list) => (list || []).some((d) => {
-      d = String(d).trim().toLowerCase();
-      return d && (host === d || host.endsWith('.' + d));
-    });
-    if (match(data.blacklist)) return false;
-    if ((data.whitelist || []).length && !match(data.whitelist)) return false;
-    return true;
-  }
-
-  loadSettings((data) => { if (domainAllowed(data)) start(); });
+  loadSettings((data) => { if (domainAllowed(data, location.hostname)) start(); });
 
   if (ext && ext.storage && ext.storage.onChanged) {
     ext.storage.onChanged.addListener((changes, area) => {
       if (area && area !== 'sync') return;
-      loadSettings((data) => { if (domainAllowed(data)) start(); });
+      loadSettings((data) => { if (domainAllowed(data, location.hostname)) start(); });
     });
   }
 })();
